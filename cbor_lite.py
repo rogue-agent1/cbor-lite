@@ -1,72 +1,83 @@
 #!/usr/bin/env python3
-"""cbor_lite - Minimal CBOR (RFC 7049) encoder and decoder."""
-import sys, struct
+"""cbor_lite: Minimal CBOR (RFC 7049) encoder/decoder."""
+import struct, sys
 
-def encode(val):
-    if val is None: return b"\xf6"
-    if val is True: return b"\xf5"
-    if val is False: return b"\xf4"
-    if isinstance(val, int):
-        if val >= 0: return _encode_uint(0, val)
-        return _encode_uint(1, -1 - val)
-    if isinstance(val, bytes): return _encode_uint(2, len(val)) + val
-    if isinstance(val, str):
-        b = val.encode("utf-8")
-        return _encode_uint(3, len(b)) + b
-    if isinstance(val, list):
-        return _encode_uint(4, len(val)) + b"".join(encode(v) for v in val)
-    if isinstance(val, dict):
-        return _encode_uint(5, len(val)) + b"".join(encode(k) + encode(v) for k, v in val.items())
-    raise TypeError(f"Cannot encode {type(val)}")
-
-def _encode_uint(major, n):
+def _encode_head(major, val):
     major <<= 5
-    if n < 24: return bytes([major | n])
-    if n < 256: return bytes([major | 24, n])
-    if n < 65536: return bytes([major | 25]) + struct.pack(">H", n)
-    if n < 2**32: return bytes([major | 26]) + struct.pack(">I", n)
-    return bytes([major | 27]) + struct.pack(">Q", n)
+    if val <= 23: return bytes([major | val])
+    if val <= 0xFF: return bytes([major | 24, val])
+    if val <= 0xFFFF: return bytes([major | 25]) + struct.pack(">H", val)
+    if val <= 0xFFFFFFFF: return bytes([major | 26]) + struct.pack(">I", val)
+    return bytes([major | 27]) + struct.pack(">Q", val)
 
-def decode(data):
-    val, _ = _decode(data, 0)
-    return val
+def encode(obj):
+    if obj is None: return b"\xf6"
+    if obj is True: return b"\xf5"
+    if obj is False: return b"\xf4"
+    if isinstance(obj, int):
+        if obj >= 0: return _encode_head(0, obj)
+        return _encode_head(1, -1 - obj)
+    if isinstance(obj, float):
+        return b"\xfb" + struct.pack(">d", obj)
+    if isinstance(obj, bytes):
+        return _encode_head(2, len(obj)) + obj
+    if isinstance(obj, str):
+        b = obj.encode()
+        return _encode_head(3, len(b)) + b
+    if isinstance(obj, (list, tuple)):
+        return _encode_head(4, len(obj)) + b"".join(encode(i) for i in obj)
+    if isinstance(obj, dict):
+        return _encode_head(5, len(obj)) + b"".join(encode(k) + encode(v) for k, v in obj.items())
+    raise TypeError(f"Cannot encode {type(obj)}")
 
-def _decode(data, i):
-    b = data[i]; major = b >> 5; info = b & 0x1f
-    if b == 0xf4: return False, i+1
-    if b == 0xf5: return True, i+1
-    if b == 0xf6: return None, i+1
-    n, i = _decode_uint(data, i)
-    if major == 0: return n, i
-    if major == 1: return -1 - n, i
-    if major == 2: return data[i:i+n], i+n
-    if major == 3: return data[i:i+n].decode("utf-8"), i+n
+def _decode_head(data, offset):
+    b = data[offset]; major = b >> 5; info = b & 0x1f
+    if info <= 23: return major, info, offset+1
+    if info == 24: return major, data[offset+1], offset+2
+    if info == 25: return major, struct.unpack(">H", data[offset+1:offset+3])[0], offset+3
+    if info == 26: return major, struct.unpack(">I", data[offset+1:offset+5])[0], offset+5
+    if info == 27: return major, struct.unpack(">Q", data[offset+1:offset+9])[0], offset+9
+    raise ValueError(f"Unknown additional info {info}")
+
+def decode(data, offset=0):
+    b = data[offset]
+    if b == 0xf6: return None, offset+1
+    if b == 0xf5: return True, offset+1
+    if b == 0xf4: return False, offset+1
+    if b == 0xfb: return struct.unpack(">d", data[offset+1:offset+9])[0], offset+9
+    major, val, offset = _decode_head(data, offset)
+    if major == 0: return val, offset
+    if major == 1: return -1 - val, offset
+    if major == 2: return data[offset:offset+val], offset+val
+    if major == 3: return data[offset:offset+val].decode(), offset+val
     if major == 4:
-        lst = []
-        for _ in range(n): v, i = _decode(data, i); lst.append(v)
-        return lst, i
+        result = []
+        for _ in range(val):
+            item, offset = decode(data, offset)
+            result.append(item)
+        return result, offset
     if major == 5:
-        d = {}
-        for _ in range(n): k, i = _decode(data, i); v, i = _decode(data, i); d[k] = v
-        return d, i
-    raise ValueError(f"Unknown major {major}")
-
-def _decode_uint(data, i):
-    info = data[i] & 0x1f; i += 1
-    if info < 24: return info, i
-    if info == 24: return data[i], i+1
-    if info == 25: return struct.unpack(">H", data[i:i+2])[0], i+2
-    if info == 26: return struct.unpack(">I", data[i:i+4])[0], i+4
-    if info == 27: return struct.unpack(">Q", data[i:i+8])[0], i+8
-    return 0, i
+        result = {}
+        for _ in range(val):
+            k, offset = decode(data, offset)
+            v, offset = decode(data, offset)
+            result[k] = v
+        return result, offset
+    raise ValueError(f"Unknown major type {major}")
 
 def test():
-    for val in [0, 1, 23, 24, 255, 1000, -1, -100, True, False, None,
-                "hello", b"\x01\x02", [1, 2, 3], {"a": 1}]:
-        assert decode(encode(val)) == val, f"Failed for {val!r}"
-    nested = {"nums": [1, 2], "flag": True, "name": "test"}
-    assert decode(encode(nested)) == nested
-    print("cbor_lite: all tests passed")
+    for val in [0, 1, 23, 24, 255, 256, 65535, 65536, -1, -100]:
+        assert decode(encode(val))[0] == val
+    assert decode(encode(None))[0] is None
+    assert decode(encode(True))[0] is True
+    assert decode(encode(False))[0] is False
+    assert abs(decode(encode(3.14))[0] - 3.14) < 1e-9
+    assert decode(encode("hello"))[0] == "hello"
+    assert decode(encode(b"\x01\x02"))[0] == b"\x01\x02"
+    assert decode(encode([1, "two", 3]))[0] == [1, "two", 3]
+    assert decode(encode({"a": 1, "b": [2, 3]}))[0] == {"a": 1, "b": [2, 3]}
+    print("All tests passed!")
 
 if __name__ == "__main__":
-    test() if "--test" in sys.argv else print("Usage: cbor_lite.py --test")
+    if len(sys.argv) > 1 and sys.argv[1] == "test": test()
+    else: print("Usage: cbor_lite.py test")
