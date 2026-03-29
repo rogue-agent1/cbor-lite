@@ -1,17 +1,9 @@
-# cbor_lite
+# cbor-lite
 
-Minimal CBOR (Concise Binary Object Representation) codec
-
-Single-file, zero-dependency Python CLI tool.
+CBOR encoder/decoder. Zero dependencies, single file, Python 3.8+.
 
 ## Usage
 
 ```bash
-python cbor_lite.py --help
-```
-
-## Test
-
-```bash
-python -c "import cbor_lite; cbor_lite.test()"
+python3 cbor_lite.py --help
 ```
